@@ -7,10 +7,11 @@
 
 use bindet;
 use bindet::types::FileType;
-use img_parts::jpeg::{markers, Jpeg, JpegSegment};
+use chrono::prelude::*;
 use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read};
+use img_parts::jpeg::*;
 
 struct Filepair {
     json: String,
@@ -86,7 +87,7 @@ fn get_file_type(image_file: &File) -> Result<FileType, String> {
 fn add_exif_metadata(image_path: &str, json_path: &str) -> Result<(), String> {
     println!("{}", image_path);
     // Open the image file using OpenOptions
-    let mut image_file = match OpenOptions::new().read(true).write(true).open(image_path) {
+    let image_file = match OpenOptions::new().read(true).write(true).open(image_path) {
         Ok(file) => file,
         Err(e) => {
             return Err(format!(
@@ -102,54 +103,57 @@ fn add_exif_metadata(image_path: &str, json_path: &str) -> Result<(), String> {
         Err(e) => return Err(e),
     };
 
+    // Parse the JSON first :)
+    // let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json_data = match fs::read_to_string(json_path) {
+        Ok(json) => json!(json),
+        Err(e) => return Err(format!("Could not read file!\nError: {}", e)),
+    };
+
+    // DateTimeOriginal
+    // The timestamp is in unix seconds (string), so like, we gotta change it into an i32
+    let photo_taken_time = match json_data["photoTakenTime"]["formatted"].as_str() {
+        Some(creation_time) => creation_time,
+        None => return Err("Could not find creationTime in json file".to_string()),
+    };
+
+    // DateTimeDigitized
+    let creation_time = match json_data["creationTime"]["formatted"].as_str() {
+        Some(creation_time) => creation_time,
+        None => return Err("Could not find creationTime in json file".to_string()),
+    };
+    // Formatted string is formetted as %b %d, %Y %I:%M:%S %p UTC
+    // But we want YYYY:MM:DD HH:MM:SS
+    // There is no timezone information for exif so I guess we use UTC for now.
+
+    // Use chrono to parse the timestamp
+    let photo_taken_time_parsed = Utc
+        .datetime_from_str(photo_taken_time, "%b %d, %Y %I:%M:%S %p UTC")
+        .unwrap();
+    let creation_time_parsed = Utc
+        .datetime_from_str(creation_time, "%b %d, %Y %I:%M:%S %p UTC")
+        .unwrap();
+
+    // Convert the parsed timestamps into a string
+    let photo_taken_time_string = photo_taken_time_parsed
+        .format("%Y:%m:%d %H:%M:%S")
+        .to_string()
+        .as_str();
+    let creation_time_string = creation_time_parsed
+        .format("%Y:%m:%d %H:%M:%S")
+        .to_string()
+        .as_str();
+
     match file_type {
         FileType::Jpg => {
-            // Parse the JSON first :)
-            // let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-            let json_data = match fs::read_to_string(json_path) {
-                Ok(json) => json!(json),
-                Err(e) => return Err(format!("Could not read file!\nError: {}", e)),
-            };
-
-            // Read the metadata in the json file
-            // https://www.awaresystems.be/imaging/tiff/tifftags/privateifd/exif.html
-            // https://www.media.mit.edu/pia/Research/deepview/exif.html
-
-            // DateTimeOriginal
-            // The timestamp is in unix seconds (string), so like, we gotta change it into an i32
-            let photo_taken_time = match json_data["photoTakenTime"]["timestamp"].as_str() {
-                Some(creation_time) => match creation_time.parse::<i32>() {
-                    Ok(creation_time) => creation_time,
-                    Err(e) => return Err(format!("Could not parse creationTime!\nError: {}", e)),
-                },
-                None => return Err("Could not find creationTime in json file".to_string()),
-            };
-            // DateTimeDigitized
-            let creation_time = match json_data["creationTime"]["timestamp"].as_str() {
-                Some(creation_time) => match creation_time.parse::<i32>() {
-                    Ok(creation_time) => creation_time,
-                    Err(e) => return Err(format!("Could not parse creationTime!\nError: {}", e)),
-                },
-                None => return Err("Could not find creationTime in json file".to_string()),
-            };
-            // The format for DateTimeOriginal/Digitized is YYYY:MM:DD HH:MM:SS
-            // Probably UTC? But exif as a whole is a mess, so who knows
-        
-
-            // Open
-            let mut image_bytes = Vec::new();
-            let _ = match image_file.read_to_end(&mut image_bytes) {
+            let mut jpegbuffer = Vec::new();
+            match BufReader::new(image_file).read_to_end(&mut jpegbuffer) {
                 Ok(_) => (),
                 Err(e) => return Err(format!("Could not read file!\nError: {}", e)),
-            };
-
-            let mut jpeg = Jpeg::from_bytes(image_bytes.into());
-
-            println!("JPG");
+            }
+            let mut jpeg = Jpeg::from_bytes(jpegbuffer.into()).unwrap();
         }
-        FileType::Png => {
-            println!("PNG");
-        }
+        FileType::Png => {}
         _ => println!("Not a PNG ot JPG"),
     }
 
@@ -168,10 +172,11 @@ fn main() {
                 files.len(),
                 then.elapsed().as_millis()
             );
-            /*for file in files.iter() {
+            for file in files.iter() {
                 // Now we have the path to the json file and the image file
                 println!("{} {}", file.json, file.image);
-            }*/
+                add_exif_metadata(&file.image, &file.json).expect("Error adding exif metadata");
+            }
         }
         Err(e) => eprintln!("Error: {}", e),
     }
